@@ -1,0 +1,7 @@
+recriar-video-cardiopulmonar/
+├── SKILL.md
+├── assets/
+│   └── exemplos-clinicos.md
+└── references/
+    ├── especificacoes-visuais-3d.md
+    └── mapeamento-fisiologico.md

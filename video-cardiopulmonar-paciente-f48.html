@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Visualização Cardiopulmonar 3D — Paciente F, 48 anos</title>
+<meta name="description" content="Visualização 3D cardiopulmonar com camadas translúcidas e HUD de TCPE parametrizado pelo laudo da paciente.">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root { --cyan: hsl(188 90% 60%); --ruby: hsl(352 85% 58%); --gold: hsl(38 95% 62%); --bg: #02060f; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: radial-gradient(ellipse at center, #071a33 0%, var(--bg) 70%); font-family: Inter, sans-serif; color: #e6f6ff; }
+  canvas { display: block; }
+  .hud { position: fixed; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 14px; pointer-events: none; }
+  .hud.left { left: 3vw; } .hud.right { right: 3vw; align-items: flex-end; }
+  .card { min-width: 230px; padding: 14px 18px; border: 1px solid hsla(188, 90%, 60%, .35); border-radius: 12px;
+    background: linear-gradient(135deg, hsla(200, 80%, 20%, .35), hsla(200, 80%, 8%, .15)); backdrop-filter: blur(8px);
+    box-shadow: 0 0 24px hsla(188, 90%, 60%, .12), inset 0 0 12px hsla(188, 90%, 60%, .08); animation: fadeIn 1s both; }
+  .card:nth-child(2) { animation-delay: .2s } .card:nth-child(3) { animation-delay: .4s }
+  .label { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--cyan); opacity: .85; }
+  .value { font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 600; margin-top: 4px; }
+  .unit { font-size: 12px; opacity: .6; margin-left: 4px; font-weight: 400; }
+  .bar { height: 4px; margin-top: 8px; border-radius: 2px; background: hsla(188, 90%, 60%, .15); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--cyan), var(--gold)); }
+  header { position: fixed; top: 24px; left: 50%; transform: translateX(-50%); text-align: center; pointer-events: none; }
+  h1 { font-size: 15px; font-weight: 500; letter-spacing: .3em; text-transform: uppercase; color: var(--cyan); }
+  header p { font-size: 12px; opacity: .6; margin-top: 6px; letter-spacing: .1em; }
+  #ecg { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); width: min(720px, 80vw); height: 70px;
+    border: 1px solid hsla(188, 90%, 60%, .25); border-radius: 10px; background: hsla(200, 80%, 8%, .35); }
+  .hr-live { color: var(--ruby); }
+  @keyframes fadeIn { from { opacity: 0; transform: translateX(-12px) } to { opacity: 1; transform: none } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Teste Cardiopulmonar de Esforço · Pico</h1>
+  <p>Paciente feminino · 48 anos · Ritmo sinusal regular</p>
+</header>
+
+<section class="hud left" aria-label="Métricas cardíacas">
+  <div class="card"><div class="label">Peak HR / Max HR</div><div class="value hr-live">162<span class="unit">/ 170 bpm</span></div><div class="bar"><i style="width:95.3%"></i></div></div>
+  <div class="card"><div class="label">Blood Pressure</div><div class="value">170/80<span class="unit">mmHg</span></div></div>
+  <div class="card"><div class="label">O₂ Pulse</div><div class="value">16.0<span class="unit">mL/beat</span></div><div class="bar"><i style="width:64%"></i></div></div>
+</section>
+<section class="hud right" aria-label="Métricas ventilatórias">
+  <div class="card"><div class="label">VO₂ Peak</div><div class="value">28.5<span class="unit">mL/kg/min</span></div><div class="bar"><i style="width:57%"></i></div></div>
+  <div class="card"><div class="label">VE/VCO₂ Slope</div><div class="value">27.5</div><div class="bar"><i style="width:55%"></i></div></div>
+  <div class="card"><div class="label">Rhythm</div><div class="value" style="font-size:18px">Normal sinus</div></div>
+</section>
+<canvas id="ecg"></canvas>
+
+<script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+// ===== Parâmetros do laudo =====
+const P = { FC_PICO: 162, FC_MAX: 170, VO2: 28.5, PULSO_O2: 16.0, SLOPE: 27.5 };
+const beatHz = P.FC_PICO / 60;          // 2.7 Hz
+const breathHz = 0.6;                   // slope < 30 → respiração fluida/harmônica
+const o2Glow = THREE.MathUtils.clamp((P.VO2 - 15) / 35, 0.2, 1); // VO2 intermediário
+const ejection = THREE.MathUtils.clamp(P.PULSO_O2 / 20, 0.4, 1.2);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0.4, 9);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.autoRotate = true; controls.autoRotateSpeed = 0.6;
+controls.minDistance = 5; controls.maxDistance = 14;
+
+scene.add(new THREE.AmbientLight(0x6688aa, 0.6));
+const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(3, 4, 5); scene.add(key);
+const rim = new THREE.PointLight(0x33ccff, 30, 20); rim.position.set(-4, 2, -3); scene.add(rim);
+const heartLight = new THREE.PointLight(0xff3344, 6, 4); scene.add(heartLight);
+
+const glass = (color, opacity) => new THREE.MeshPhysicalMaterial({ color, transparent: true, opacity, roughness: .15,
+  metalness: 0, transmission: .4, clearcoat: 1, depthWrite: false, side: THREE.DoubleSide });
+
+// ===== Camada externa: torso (vidro ~20%) =====
+const torsoProfile = [];
+[[0,-2.6],[1.35,-2.6],[1.45,-1.6],[1.3,-0.6],[1.5,0.6],[1.75,1.5],[1.6,2.1],[0.6,2.5],[0.42,2.9],[0.4,3.4],[0,3.4]]
+  .forEach(([x,y]) => torsoProfile.push(new THREE.Vector2(x, y)));
+const torsoGeo = new THREE.LatheGeometry(new THREE.SplineCurve(torsoProfile).getPoints(60), 64);
+torsoGeo.scale(1, 1, 0.62);
+const torso = new THREE.Mesh(torsoGeo, glass(0x1a8fb0, 0.18));
+scene.add(torso);
+const torsoEdges = new THREE.Mesh(torsoGeo, new THREE.MeshBasicMaterial({ color: 0x33ddff, wireframe: true, transparent: true, opacity: .04 }));
+scene.add(torsoEdges);
+
+// ===== Camada intermediária: costelas, esterno, coluna (~30%) =====
+const boneMat = glass(0xd8eef5, 0.3);
+const ribs = new THREE.Group();
+for (let i = 0; i < 10; i++) {
+  const y = 1.8 - i * 0.28, r = 1.05 + Math.sin((i / 9) * Math.PI) * 0.35;
+  [-1, 1].forEach(s => {
+    const rib = new THREE.Mesh(new THREE.TorusGeometry(r, 0.035, 8, 48, Math.PI * 0.9), boneMat);
+    rib.rotation.set(Math.PI / 2 + 0.25, 0, s > 0 ? -Math.PI * 0.45 : Math.PI * 1.45 - Math.PI * 0.9 + Math.PI * 0.9);
+    rib.scale.set(1, 0.65, 1); rib.position.y = y;
+    if (s < 0) rib.rotation.z = Math.PI * 0.55;
+    ribs.add(rib);
+  });
+}
+scene.add(ribs);
+const sternum = new THREE.Mesh(new THREE.CapsuleGeometry(0.09, 1.7, 6, 12), boneMat); sternum.position.set(0, 0.95, 0.88); scene.add(sternum);
+for (let i = 0; i < 16; i++) {
+  const v = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.14, 12), boneMat);
+  v.position.set(0, 2.4 - i * 0.24, -0.75); scene.add(v);
+}
+
+// ===== Pulmões com brônquios e brilho alveolar =====
+const lungMat = new THREE.MeshPhysicalMaterial({ color: 0xff8a95, emissive: 0xff5a40, emissiveIntensity: 0.15,
+  transparent: true, opacity: 0.38, roughness: .5, transmission: .3, depthWrite: false });
+function makeLung(side) {
+  const g = new THREE.SphereGeometry(1, 48, 48);
+  const pos = g.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const taper = 0.55 + 0.45 * (1 - (y + 1) / 2) ** 0.6;   // ápice estreito, base larga
+    x *= taper; z *= taper;
+    if (x * side < 0) x *= 0.45;                              // face medial achatada (incisura cardíaca)
+    pos.setXYZ(i, x, y, z);
+  }
+  g.computeVertexNormals();
+  const m = new THREE.Mesh(g, lungMat.clone());
+  m.scale.set(0.85, 1.55, 0.75); m.position.set(side * 0.95, 0.75, -0.05);
+  return m;
+}
+const lungs = [makeLung(-1), makeLung(1)]; lungs.forEach(l => scene.add(l));
+
+const airMat = new THREE.MeshStandardMaterial({ color: 0xbfe9ff, emissive: 0x3399cc, emissiveIntensity: .4, transparent: true, opacity: .7 });
+const tube = (pts, r) => new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, r, 8), airMat);
+scene.add(tube([new THREE.Vector3(0, 3.2, -0.1), new THREE.Vector3(0, 1.9, -0.1)], 0.09));
+function branch(start, dir, len, r, depth) {
+  if (depth === 0) return;
+  const end = start.clone().add(dir.clone().multiplyScalar(len));
+  scene.add(tube([start, start.clone().lerp(end, .5).add(new THREE.Vector3(0, -.03, .02)), end], r));
+  [-1, 1].forEach(s => {
+    const nd = dir.clone().applyAxisAngle(new THREE.Vector3(0, 0, 1), s * 0.45).applyAxisAngle(new THREE.Vector3(0, 1, 0), s * .3).normalize();
+    branch(end, nd, len * 0.68, r * 0.68, depth - 1);
+  });
+}
+branch(new THREE.Vector3(0, 1.9, -0.1), new THREE.Vector3(-0.8, -0.6, 0).normalize(), 0.55, 0.06, 4);
+branch(new THREE.Vector3(0, 1.9, -0.1), new THREE.Vector3(0.8, -0.6, 0).normalize(), 0.55, 0.06, 4);
+
+// Alvéolos: partículas de difusão de O2
+const alvCount = 1800, alvGeo = new THREE.BufferGeometry(), alvPos = new Float32Array(alvCount * 3), alvPhase = new Float32Array(alvCount);
+for (let i = 0; i < alvCount; i++) {
+  const side = i % 2 ? 1 : -1, u = Math.random() * Math.PI * 2, v = Math.acos(2 * Math.random() - 1), r = Math.cbrt(Math.random()) * .9;
+  let x = r * Math.sin(v) * Math.cos(u), y = r * Math.cos(v), z = r * Math.sin(v) * Math.sin(u);
+  const taper = 0.55 + 0.45 * (1 - (y + 1) / 2) ** .6; x *= taper; z *= taper; if (x * side < 0) x *= .45;
+  alvPos.set([side * .95 + x * .85, .75 + y * 1.55, -.05 + z * .75], i * 3); alvPhase[i] = Math.random();
+}
+alvGeo.setAttribute('position', new THREE.BufferAttribute(alvPos, 3));
+const alvMat = new THREE.PointsMaterial({ color: 0xffb070, size: 0.045, transparent: true, opacity: .6, blending: THREE.AdditiveBlending, depthWrite: false });
+const alveoli = new THREE.Points(alvGeo, alvMat); scene.add(alveoli);
+
+// ===== Camada central: coração e grandes vasos (opaco) =====
+const heartGeo = new THREE.SphereGeometry(0.62, 64, 64);
+const hp = heartGeo.attributes.position, heartBase = hp.array.slice();
+for (let i = 0; i < hp.count; i++) {   // formato cônico com ápice para baixo/esquerda
+  let x = hp.getX(i), y = hp.getY(i), z = hp.getZ(i);
+  const k = y < 0 ? 1 + y * 0.55 : 1 + y * 0.1;
+  x *= k; z *= k * 0.85; y *= 1.15;
+  heartBase[i*3] = x; heartBase[i*3+1] = y; heartBase[i*3+2] = z;
+}
+const heartMat = new THREE.MeshPhysicalMaterial({ color: 0xb3202e, emissive: 0x550008, emissiveIntensity: .5, roughness: .35,
+  clearcoat: .8, sheen: 1, sheenColor: new THREE.Color(0xff6655), thickness: 1, transmission: 0.05 });
+const heart = new THREE.Mesh(heartGeo, heartMat);
+const heartGroup = new THREE.Group(); heartGroup.add(heart);
+heartGroup.position.set(-0.25, 0.35, 0.35); heartGroup.rotation.z = 0.45; heartGroup.rotation.x = 0.2;
+scene.add(heartGroup); heartLight.position.copy(heartGroup.position).add(new THREE.Vector3(0, 0, 1));
+
+// Coronárias
+const corMat = new THREE.MeshStandardMaterial({ color: 0xffd0a0, emissive: 0xff7733, emissiveIntensity: .6 });
+for (let c = 0; c < 5; c++) {
+  const pts = []; const a0 = c * 1.2;
+  for (let t = 0; t <= 1; t += .1) { const a = a0 + t * 1.4, y = .55 - t * 1.25, r = .66 * (y < 0 ? 1 + y * .55 : 1);
+    pts.push(new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r * .85)); }
+  heart.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, 0.018, 6), corMat));
+}
+
+// Grandes vasos
+const vessel = (pts, r, color, emi) => {
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const m = new THREE.Mesh(new THREE.TubeGeometry(curve, 80, r, 16), new THREE.MeshPhysicalMaterial({ color, emissive: emi, emissiveIntensity: .45, roughness: .3, clearcoat: 1 }));
+  scene.add(m); return curve;
+};
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+const aorta = vessel([V(-.1,.85,.4), V(0,1.5,.35), V(.25,1.85,0), V(.45,1.5,-.45), V(.3,.4,-.6), V(.2,-2.4,-.6)], .12, 0xd0283a, 0x660010);
+vessel([V(.25,1.85,0), V(.3,2.6,.05)], .05, 0xd0283a, 0x660010);
+vessel([V(.05,1.75,.25), V(-.05,2.6,.25)], .05, 0xd0283a, 0x660010);
+const pulm = vessel([V(-.45,.8,.55), V(-.4,1.35,.45), V(-.1,1.45,.2)], .1, 0x2a6fd8, 0x0a2066);
+vessel([V(-.1,1.45,.2), V(-.9,1.2,0)], .07, 0x2a6fd8, 0x0a2066);
+vessel([V(-.1,1.45,.2), V(.7,1.25,-.1)], .07, 0x2a6fd8, 0x0a2066);
+const svc = vessel([V(.45,2.6,.1), V(.4,1.4,.15), V(.3,.75,.3)], .09, 0x1f58c0, 0x081a55);
+const ivc = vessel([V(.35,-2.4,-.3), V(.35,-.3,0), V(.25,0,.2)], .1, 0x1f58c0, 0x081a55);
+
+// Fluxo sanguíneo (partículas nas curvas)
+const flows = [];
+function addFlow(curve, color, n, speed) {
+  const g = new THREE.BufferGeometry(); const arr = new Float32Array(n * 3); g.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  const pts = new THREE.Points(g, new THREE.PointsMaterial({ color, size: .07, transparent: true, opacity: .95, blending: THREE.AdditiveBlending, depthWrite: false }));
+  scene.add(pts); flows.push({ curve, arr, g, n, speed, off: Array.from({ length: n }, () => Math.random()) });
+}
+addFlow(aorta, 0xff5a3c, 70, .35); addFlow(pulm, 0x40d8ff, 25, .4); addFlow(svc, 0x3aa8ff, 30, .25); addFlow(ivc, 0x3aa8ff, 40, .25);
+
+// Condução elétrica (nó sinusal → ventrículos)
+const sparkMat = new THREE.MeshBasicMaterial({ color: 0xddf4ff, transparent: true, opacity: 0 });
+const spark = new THREE.Mesh(new THREE.SphereGeometry(0.05, 16, 16), sparkMat); heart.add(spark);
+const condPath = new THREE.CatmullRomCurve3([V(.35,.6,.35), V(.1,.3,.55), V(0,0,.6), V(-.05,-.35,.5), V(0,-.65,.2)]);
+
+// Bloom
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.75, 0.6, 0.15));
+
+// ECG
+const ecg = document.getElementById('ecg'), ctx = ecg.getContext('2d');
+function sizeEcg() { ecg.width = ecg.clientWidth * devicePixelRatio; ecg.height = ecg.clientHeight * devicePixelRatio; }
+sizeEcg();
+function ecgWave(p) { // p ∈ [0,1) fase do ciclo
+  const g = (c, w, a) => a * Math.exp(-((p - c) ** 2) / (2 * w * w));
+  return g(.12,.025,.12) - g(.24,.008,.15) + g(.26,.01,1) - g(.29,.01,.25) + g(.48,.04,.28);
+}
+let ecgX = 0, lastY = null;
+
+// Loop
+const clock = new THREE.Clock();
+function animate() {
+  const t = clock.getElapsedTime();
+  const phase = (t * beatHz) % 1;
+  // sístole rápida (0–0.35), diástole lenta
+  const sys = phase < .35 ? Math.sin((phase / .35) * Math.PI) : 0;
+  const contract = 1 - 0.13 * ejection * sys;
+
+  const arr = hp.array;
+  for (let i = 0; i < hp.count; i++) {
+    const y = heartBase[i*3+1], vent = y < 0.1 ? 1 : 0.35;      // ventrículos contraem mais
+    const atr = phase > .85 || phase < .05 ? 0.04 : 0;            // sístole atrial
+    const s = contract * (y >= .1 ? 1 - atr : 1) + (1 - contract) * (1 - vent);
+    arr[i*3] = heartBase[i*3] * s; arr[i*3+1] = heartBase[i*3+1] * (1 - (1 - s) * .5); arr[i*3+2] = heartBase[i*3+2] * s;
+  }
+  hp.needsUpdate = true; heartGeo.computeVertexNormals();
+  heartMat.emissiveIntensity = .4 + sys * .9; heartLight.intensity = 4 + sys * 10;
+
+  // condução elétrica
+  if (phase < .3) { spark.position.copy(condPath.getPoint(phase / .3)); sparkMat.opacity = 1; } else sparkMat.opacity *= .85;
+
+  // respiração
+  const br = (Math.sin(t * breathHz * Math.PI * 2) + 1) / 2;
+  lungs.forEach((l, i) => { l.scale.set(.85 + br * .06, 1.55 + br * .07, .75 + br * .07);
+    l.material.emissiveIntensity = .1 + br * .35 * o2Glow; });
+  ribs.scale.set(1 + br * .03, 1, 1 + br * .05); torso.scale.set(1 + br * .015, 1, 1 + br * .025);
+  alveoli.scale.set(1 + br * .05, 1 + br * .05, 1 + br * .05);
+  alvMat.opacity = .25 + br * .6 * o2Glow; alvMat.size = .035 + br * .025;
+
+  // fluxo
+  flows.forEach(f => {
+    const pulse = f.curve === aorta ? 1 + sys * 2.5 * ejection : 1;
+    for (let i = 0; i < f.n; i++) {
+      f.off[i] = (f.off[i] + f.speed * pulse * 0.016) % 1;
+      const p = f.curve.getPoint(f.off[i]); f.arr.set([p.x, p.y, p.z], i * 3);
+    }
+    f.g.attributes.position.needsUpdate = true;
+  });
+
+  // ECG
+  const W = ecg.width, H = ecg.height, speed = 2.2 * devicePixelRatio;
+  ctx.fillStyle = 'rgba(3,12,24,0.08)'; ctx.fillRect(ecgX, 0, 14 * devicePixelRatio, H);
+  ctx.clearRect((ecgX + 14 * devicePixelRatio) % W, 0, 10 * devicePixelRatio, H);
+  const y = H * .7 - ecgWave(phase) * H * .55;
+  ctx.strokeStyle = '#4fe3ff'; ctx.lineWidth = 2 * devicePixelRatio; ctx.shadowColor = '#4fe3ff'; ctx.shadowBlur = 8;
+  if (lastY !== null && ecgX > 0) { ctx.beginPath(); ctx.moveTo(ecgX - speed, lastY); ctx.lineTo(ecgX, y); ctx.stroke(); }
+  lastY = y; ecgX += speed; if (ecgX > W) { ecgX = 0; lastY = null; }
+
+  controls.update(); composer.render(); requestAnimationFrame(animate);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight); composer.setSize(innerWidth, innerHeight); sizeEcg();
+});
+</script>
+</body>
+</html>
